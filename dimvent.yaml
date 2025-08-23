@@ -1,0 +1,694 @@
+# https://github.com/malinovsku/dimvent
+substitutions:
+  device_name: Dimvent
+  friendly_name: Dimvent
+  project: "malinovsku.Dimvent"
+  name_add_mac_suffix: "false"
+
+  speed_high: "1.0"
+  speed_medium: "0.8"
+  speed_low: "0.68"
+  time_stoped_motor: 1s
+
+  pin_output_1: GPIO04
+  pin_output_2: GPIO03
+  pin_light: GPIO05
+  pin_sda: GPIO06
+  pin_scl: GPIO07
+  pin_button_1: GPIO00
+  pin_button_2: GPIO01
+
+  wifi_ssid: !secret wifi_ssid
+  wifi_password: !secret wifi_password
+  ap_wifi_password: !secret wifi_ap_pass
+  api_key: !secret api_key
+  ota_password: !secret ota_password
+
+api:
+  encryption:
+    key: ${api_key}
+
+ota:
+  - platform: esphome
+    password: ${ota_password}
+
+wifi:
+  ssid: ${wifi_ssid}
+  password: ${wifi_password}
+  ap:
+    ssid: ${device_name}
+    password: ${ap_wifi_password}
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: arduino
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: ${name_add_mac_suffix}
+  project:
+    name: ${project}
+    version: ${device_name}
+  comment: ${project}
+  on_boot:
+    priority: -800
+    then:
+      - button.press: fix_problem
+
+captive_portal:
+
+logger:
+  level: INFO
+
+web_server:
+    port: 80
+    version: 3
+    js_url: http://192.168.100.5:8123/local/esphome/webserver-v3.js
+
+i2c:
+  sda: ${pin_sda}
+  scl: ${pin_scl}
+
+as5600:
+  start_position: 0deg
+  range: 360deg
+  id: my_as5600
+
+globals:
+  - id: g_speed
+    type: float
+    restore_value: true
+  - id: position_new
+    type: float
+    initial_value: '0.0'
+  - id: position_latest
+    type: float
+    initial_value: '0.0'
+
+binary_sensor:
+  - platform: status
+    name: Status esp
+    entity_category: diagnostic
+  - platform: template
+    name: "Attempts exceeded"
+    device_class: problem
+    id: problem_attempts_exceeded
+    on_press:
+      then:
+        - light.turn_on:
+            id: status_light
+            brightness: 100%
+            red: 100%
+            green: 0%
+            blue: 0%
+            effect: "Fast Pulse"
+    on_release:
+      then:
+        - light.turn_off: status_light
+  - platform: gpio
+    name: Button1
+    disabled_by_default: true
+    id: bt1
+    filters:
+      - delayed_on: 100ms
+    pin:
+      number: ${pin_button_1}
+      mode: INPUT_PULLUP
+      inverted: True
+    on_press:
+      then:
+        - button.press: fix_problem
+        - if:
+            condition:
+              - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_IDLE;
+            then:
+              - cover.open: window
+            else:
+              - cover.stop: window
+  - platform: gpio
+    name: Button2
+    disabled_by_default: true
+    id: bt2
+    filters:
+      - delayed_on: 100ms
+    pin:
+      number: ${pin_button_2}
+      mode: INPUT_PULLUP
+      inverted: True
+    on_press:
+      then:
+        - button.press: fix_problem
+        - if:
+            condition:
+              - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_IDLE;
+            then:
+              - cover.close: window
+            else:
+              - cover.stop: window
+
+number:
+  - platform: template
+    name: "Angle Closed Position"
+    icon: "mdi:window-closed"
+    entity_category: CONFIG
+    min_value: 0
+    max_value: 360
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: 100
+    id: angle_pos_closed
+    on_value:
+      then:
+        - select.set:
+            id: speed
+            option: "Low"
+        - if:
+            condition:
+              - lambda: return x > id(angle).state;
+            then:
+              - script.execute: run_counterclockwise
+              - wait_until:
+                  lambda: return x <= id(angle).state;
+              - script.execute: motor_stop
+            else:
+              - if:
+                  condition:
+                    - lambda: return x < id(angle).state;
+                  then:
+                    - script.execute: run_clockwise
+                    - wait_until:
+                        lambda: return x >= id(angle).state;
+                    - script.execute: motor_stop
+  - platform: template
+    name: "Number repeat attempts"
+    icon: "mdi:repeat-variant"
+    entity_category: CONFIG
+    min_value: 0
+    max_value: 10
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: 3
+    id: number_repeat_attempts
+    mode: box
+  - platform: template
+    name: "Limit Open High"
+    icon: "mdi:arrow-split-vertical"
+    entity_category: CONFIG
+    min_value: 0.0
+    max_value: 10
+    step: 0.1
+    optimistic: true
+    mode: box
+    restore_value: true
+    initial_value: 5
+    id: lim_open_high
+  - platform: template
+    name: "Limit Closed High"
+    icon: "mdi:arrow-collapse-horizontal"
+    entity_category: CONFIG
+    min_value: 0.0
+    max_value: 10
+    step: 0.1
+    optimistic: true
+    mode: box
+    restore_value: true
+    initial_value: 5
+    id: lim_close_high
+  - platform: template
+    name: "Limit Open Medium"
+    icon: "mdi:arrow-split-vertical"
+    entity_category: CONFIG
+    min_value: 0.0
+    max_value: 10
+    step: 0.1
+    optimistic: true
+    mode: box
+    restore_value: true
+    initial_value: 5
+    id: lim_open_medium
+  - platform: template
+    name: "Limit Closed Medium"
+    icon: "mdi:arrow-collapse-horizontal"
+    entity_category: CONFIG
+    min_value: 0.0
+    max_value: 10
+    step: 0.1
+    optimistic: true
+    mode: box
+    restore_value: true
+    initial_value: 5
+    id: lim_close_medium
+  - platform: template
+    name: "Limit Open Low"
+    icon: "mdi:arrow-split-vertical"
+    entity_category: CONFIG
+    min_value: 0.0
+    max_value: 10
+    step: 0.1
+    optimistic: true
+    mode: box
+    restore_value: true
+    initial_value: 5
+    id: lim_open_low
+  - platform: template
+    name: "Limit Closed Low"
+    icon: "mdi:arrow-collapse-horizontal"
+    entity_category: CONFIG
+    min_value: 0.0
+    max_value: 10
+    step: 0.1
+    optimistic: true
+    mode: box
+    restore_value: true
+    initial_value: 5
+    id: lim_close_low
+
+select:
+  - platform: template
+    name: "Speed"
+    icon: "mdi:speedometer"
+    optimistic: true
+    entity_category: CONFIG
+    restore_value: true
+    options:
+      - High
+      - Medium
+      - Low
+    initial_option: Medium
+    id: speed
+    set_action:
+      then:
+        - if:
+            condition:
+              - lambda: return x == "High";
+            then:
+              - lambda: id(g_speed) = ${speed_high};
+            else:
+              - if:
+                  condition:
+                    - lambda: return x == "Medium";
+                  then:
+                    - lambda: id(g_speed) = ${speed_medium};
+                  else:
+                    - lambda: id(g_speed) = ${speed_low};
+        - if:
+            condition:
+              - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_OPENING;
+            then:
+              - output.set_level:
+                  id: my_output_id2
+                  level: !lambda 'return id(g_speed);' 
+        - if:
+            condition:
+              - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_CLOSING;
+            then:
+              - output.set_level:
+                  id: my_output_id1
+                  level: !lambda 'return id(g_speed);' 
+
+light:
+  - platform: esp32_rmt_led_strip
+    rgb_order: GRB
+    default_transition_length: 0s
+    pin: ${pin_light}
+    num_leds: 1
+    chipset: ws2812
+    name: "Light"
+    id: status_light
+    entity_category: CONFIG
+    effects:
+      - pulse:
+          name: "Fast Pulse"
+          transition_length: 0.5s
+          update_interval: 0.5s
+          min_brightness: 0%
+          max_brightness: 100%
+      - pulse:
+          name: "Slow Pulse"
+          transition_length: 500ms
+          update_interval: 2s
+
+sensor:
+  - platform: wifi_signal
+    name: Wifi signal esp
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: uptime
+    name: Uptime esp
+    update_interval: 5min
+    id: uptime_sensor
+  - platform: internal_temperature
+    name: Chip Temperature
+  - platform: template
+    name: "Unsuccessful attempts"
+    icon: "mdi:alert"
+    id: unsuccessful_attempts
+    accuracy_decimals: 0
+    on_value:
+      then:
+        - if:
+            condition:
+              - lambda: return x >= id(number_repeat_attempts).state;
+            then:
+              - binary_sensor.template.publish:
+                  id: problem_attempts_exceeded
+                  state: ON
+            else:
+              - binary_sensor.template.publish:
+                  id: problem_attempts_exceeded
+                  state: OFF
+  - platform: as5600
+    update_interval: 30ms
+    name: Angle
+    unit_of_measurement: '°'
+    accuracy_decimals: 0
+    icon: mdi:angle-acute
+    id: angle
+    filters:
+      - lambda: 'return x * as5600::RAW_TO_DEGREES * id(my_as5600).get_range_scale();'
+      - delta: 1
+    status:
+      name: Status magnet
+    on_value:
+      then:
+        - sensor.template.publish:
+            id: position_current
+            state: !lambda 'return x;'
+  - platform: template
+    id: position_current
+    filters:
+      - lambda: return ((x-id(angle_pos_closed).state)/180);
+      - delta: 0.01
+      - clamp:
+          min_value: 0.0
+          max_value: 1.0
+    on_value:
+      then:
+        - sensor.template.publish:
+            id: position_current_percent
+            state: !lambda 'return x;'
+  - platform: template
+    name: "Position"
+    id: position_current_percent
+    icon: mdi:select-place
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    filters:
+      - lambda: return int(x*100);
+      - clamp:
+          min_value: 0
+          max_value: 100
+  - platform: ina226
+    address: 0x40
+    shunt_resistance: 0.1 ohm
+    max_current: 3.2A
+    adc_averaging: 128
+    adc_time:
+      voltage: 140us
+      current: 332us
+    update_interval: 500ms
+    # current:
+    #   name: "Current"
+    #   disabled_by_default: true
+    # bus_voltage:
+    #   name: "Voltage"
+    #   disabled_by_default: true
+    power:
+      name: "Power"
+      filters:
+        - delta: 0.01
+      on_value:
+        then:
+        - if:
+            condition:
+              or:
+              - and:
+                - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_OPENING;
+                - or:
+                  - lambda: return id(speed).state == "High" and x >= id(lim_open_high).state;
+                  - lambda: return id(speed).state == "Medium" and x >= id(lim_open_medium).state;
+                  - lambda: return id(speed).state == "Low" and x >= id(lim_open_low).state;
+              - and:
+                - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_CLOSING;
+                - or:
+                  - lambda: return id(speed).state == "High" and x >= id(lim_close_high).state;
+                  - lambda: return id(speed).state == "Medium" and x >= id(lim_close_medium).state;
+                  - lambda: return id(speed).state == "Low" and x >= id(lim_close_low).state;
+            then:
+              - if:
+                  condition:
+                    or:
+                    - and:
+                      - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_OPENING;
+                      - lambda: return id(position_new) < id(position_latest);
+                    - and:
+                      - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_CLOSING;
+                      - lambda: return id(position_new) > id(position_latest);
+                  then:
+                    - logger.log:
+                        level: INFO
+                        format: "Перегрузка при возврате %.2fW. Останавливаемся"
+                        args: [ 'x' ]
+                    - script.execute: motor_stop
+                    - script.stop: waiting_action_work
+                    - script.stop: power_overdrawn
+                    - sensor.template.publish:
+                        id: unsuccessful_attempts
+                        state: 15
+                  else:
+                    - logger.log:
+                        level: INFO
+                        format: "Перегрузка %.2fW"
+                        args: [ 'x' ]
+                    - script.execute: power_overdrawn
+
+output:
+  - platform: ledc
+    id: my_output_id1
+    inverted: false
+    max_power: 1
+    min_power: 0
+    pin: ${pin_output_1}
+    frequency: 25000
+  - platform: ledc
+    id: my_output_id2
+    inverted: false
+    max_power: 1
+    min_power: 0
+    pin: ${pin_output_2}
+    frequency: 25000
+
+cover:
+  - platform: template
+    name: Window
+    id: window
+    lambda: return id(position_current).state;
+    open_action:
+      then:
+        - button.press: fix_problem
+        - lambda: id(action_cover_pos)->execute(1.0);
+    close_action:
+      then:
+        - button.press: fix_problem
+        - lambda: id(action_cover_pos)->execute(0);
+    position_action:
+      then:
+        - button.press: fix_problem
+        - lambda: id(action_cover_pos)->execute(pos);
+    stop_action:
+      then:
+        - script.stop: action_cover_pos
+        - script.execute: motor_stop
+        - script.stop: waiting_action_work
+        - button.press: fix_problem
+    has_position: true
+    device_class: window
+
+script:
+  - id: motor_stop
+    mode: restart 
+    then:
+      - logger.log:
+          level: INFO
+          format: "Run script motor_stop"
+      - cover.template.publish:
+          id: window
+          current_operation: IDLE
+      - script.stop: action_cover_pos
+      - output.turn_on: my_output_id1
+      - output.turn_on: my_output_id2
+      - delay: ${time_stoped_motor}
+      - output.turn_off: my_output_id1
+      - output.turn_off: my_output_id2
+  - id: action_cover_pos
+    mode: restart 
+    parameters:
+      new_position: float
+    then:
+        - script.stop: motor_stop
+        - if:
+            condition:
+              lambda: return id(unsuccessful_attempts).state < 1;
+            then:
+              - lambda: id(position_new) = new_position;
+              - lambda: id(position_latest) = id(window).position;
+              - logger.log:
+                  level: INFO
+                  format: "id(position_new) = %.2f and id(position_latest) = %.2f"
+                  args: [ 'id(position_new)', 'id(position_latest)' ]
+              - script.execute: waiting_action_work
+        - if:
+            condition:
+              lambda: |-
+                return new_position > id(position_current).state;
+            then:
+              - script.execute: run_counterclockwise
+              - cover.template.publish:
+                  id: window
+                  current_operation: !lambda |-
+                        return COVER_OPERATION_OPENING;
+              - wait_until:
+                  condition:
+                    lambda: 'return id(position_current).state >= new_position;'
+                  timeout: 90s
+            else:
+              - script.execute: run_clockwise
+              - cover.template.publish:
+                  id: window
+                  current_operation: !lambda |-
+                        return COVER_OPERATION_CLOSING;
+              - wait_until:
+                  condition:
+                    lambda: 'return id(position_current).state <= new_position;'
+                  timeout: 90s
+        - script.execute: motor_stop
+        - cover.template.publish:
+            id: window
+            current_operation: IDLE
+  - id: run_clockwise
+    mode: restart 
+    then:
+      - script.stop: run_counterclockwise
+      - script.stop: motor_stop
+      - output.turn_off: my_output_id1
+      - output.turn_off: my_output_id2
+      - lambda: id(my_output_id1).set_level(id(g_speed));
+  - id: run_counterclockwise
+    mode: restart 
+    then:
+      - script.stop: run_clockwise
+      - script.stop: motor_stop
+      - output.turn_off: my_output_id1
+      - output.turn_off: my_output_id2
+      - lambda: id(my_output_id2).set_level(id(g_speed));
+  - id: waiting_action_work
+    mode: restart 
+    then:
+      - logger.log:
+          level: INFO
+          format: "Ожидаем окончания дейтсвия для сброса проблем, новое положение %.2f"
+          args: [ 'id(position_new)' ]
+      - if:
+          condition:
+            lambda: 'return id(position_current).state < id(position_new);'
+          then:
+            - wait_until:
+                condition:
+                  - lambda: 'return id(position_current).state >= id(position_new);'
+          else:
+            - wait_until:
+                condition:
+                  - lambda: 'return id(position_current).state <= id(position_new);'
+      - script.stop: power_overdrawn
+      - button.press: fix_problem
+      - logger.log:
+          level: INFO
+          format: "Завершили ожидание, проблем %.0f, текущее положение %.2f"
+          args: ['id(unsuccessful_attempts).state', 'id(window).position' ]
+  - id: power_overdrawn
+    mode: restart 
+    then:
+      - sensor.template.publish:
+          id: unsuccessful_attempts
+          state: !lambda 'return id(unsuccessful_attempts).state + 1;'
+      - script.execute: motor_stop
+      - script.wait: motor_stop
+      - logger.log:
+          level: INFO
+          format: "Проблема № %.0f . Текущее id(window).position = %.2f . Отправка на начальное и ожидание id(position_latest) = %.2f"
+          args: [ 'id(unsuccessful_attempts).state', 'id(window).position', 'id(position_latest)' ]
+      - lambda: id(action_cover_pos)->execute(id(position_latest));
+      - if:
+          condition:
+            lambda: 'return id(position_current).state < id(position_latest);'
+          then:
+            - wait_until:
+                condition:
+                  - lambda: 'return id(position_current).state >= id(position_latest);'
+          else:
+            - wait_until:
+                condition:
+                  - lambda: 'return id(position_current).state <= id(position_latest);'
+      - logger.log:
+          level: INFO
+          format: "Вернулись на предыдущее id(position_latest) = %.2f"
+          args: [ 'id(position_latest)']
+      - if:
+          condition:
+            binary_sensor.is_off: problem_attempts_exceeded
+          then:
+            - logger.log:
+                level: INFO
+                format: "Повторная отправка на id(position_new) = %.2f"
+                args: ['id(position_new)' ]
+            - script.execute: motor_stop
+            - script.wait: motor_stop
+            - lambda: id(action_cover_pos)->execute(id(position_new));
+          else:
+            - logger.log:
+                level: INFO
+                format: "Превышено количество попыток %.0f"
+                args: ['id(unsuccessful_attempts).state']
+
+button:
+  - platform: restart
+    name: Restart esp
+    entity_category: diagnostic
+    id: bt_restart
+  - platform: template
+    name: "Motor counterclockwise"
+    entity_category: CONFIG
+    icon: "mdi:restore"
+    id: button_run_clockwise
+    on_press:
+      - script.execute: run_clockwise
+  - platform: template
+    name: "Motor clockwise"
+    entity_category: CONFIG
+    icon: "mdi:reload"
+    id: button_run_counterclockwise
+    on_press:
+      - script.execute: run_counterclockwise
+  - platform: template
+    name: "Motor Stop"
+    entity_category: CONFIG
+    id: buttont_motor_stop
+    icon: "mdi:stop"
+    on_press:
+      - script.execute: motor_stop
+  - platform: template
+    name: "Fix problem"
+    id: fix_problem
+    entity_category: CONFIG
+    icon: "mdi:auto-fix"
+    on_press:
+      - sensor.template.publish:
+          id: unsuccessful_attempts
+          state: 0
+      - logger.log:
+          level: INFO
+          format: "Проблемы сброшены"
