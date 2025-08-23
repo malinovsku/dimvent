@@ -65,7 +65,6 @@ logger:
 web_server:
     port: 80
     version: 3
-    js_url: http://192.168.100.5:8123/local/esphome/webserver-v3.js
 
 i2c:
   sda: ${pin_sda}
