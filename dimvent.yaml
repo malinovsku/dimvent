@@ -118,7 +118,6 @@ binary_sensor:
       inverted: True
     on_press:
       then:
-        - button.press: fix_problem
         - if:
             condition:
               - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_IDLE;
@@ -138,7 +137,6 @@ binary_sensor:
       inverted: True
     on_press:
       then:
-        - button.press: fix_problem
         - if:
             condition:
               - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_IDLE;
