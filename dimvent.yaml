@@ -1,28 +1,30 @@
 # https://github.com/malinovsku/dimvent
 substitutions:
-  device_name: Dimvent
+  device_name: dimvent
   friendly_name: Dimvent
   project: "malinovsku.Dimvent"
   name_add_mac_suffix: "false"
-
-  speed_high: "1.0"
-  speed_medium: "0.8"
-  speed_low: "0.68"
-  time_stoped_motor: 1s
-
-  pin_output_1: GPIO04
-  pin_output_2: GPIO03
-  pin_light: GPIO05
-  pin_sda: GPIO06
-  pin_scl: GPIO07
-  pin_button_1: GPIO00
-  pin_button_2: GPIO01
 
   wifi_ssid: !secret wifi_ssid
   wifi_password: !secret wifi_password
   ap_wifi_password: !secret wifi_ap_pass
   api_key: !secret api_key
   ota_password: !secret ota_password
+
+  speed_high: "1.0"
+  speed_medium: "0.8"
+  speed_low: "0.68"
+  time_stoped_motor: 1s
+  direction: clockwise
+
+  pin_output_1: GPIO03
+  pin_output_2: GPIO04
+  pin_light: GPIO05
+  pin_dir: GPIO010
+  pin_sda: GPIO06
+  pin_scl: GPIO07
+  pin_button_1: GPIO00
+  pin_button_2: GPIO01
 
 api:
   encryption:
@@ -74,6 +76,8 @@ as5600:
   start_position: 0deg
   range: 360deg
   id: my_as5600
+  dir_pin: ${pin_dir}
+  direction: ${direction}
 
 globals:
   - id: g_speed
@@ -83,6 +87,9 @@ globals:
     type: float
     initial_value: '0.0'
   - id: position_latest
+    type: float
+    initial_value: '0.0'
+  - id: gl_check_spin_latest
     type: float
     initial_value: '0.0'
 
@@ -263,6 +270,18 @@ number:
     restore_value: true
     initial_value: 5
     id: lim_close_low
+  - platform: template
+    name: "Angle Opening"
+    icon: "mdi:angle-acute"
+    entity_category: CONFIG
+    min_value: 0
+    max_value: 180
+    step: 1
+    optimistic: true
+    mode: box
+    restore_value: true
+    initial_value: 180
+    id: angle_opening
 
 select:
   - platform: template
@@ -367,7 +386,7 @@ sensor:
     id: angle
     filters:
       - lambda: 'return x * as5600::RAW_TO_DEGREES * id(my_as5600).get_range_scale();'
-      - delta: 1
+      - delta: 2
     status:
       name: Status magnet
     on_value:
@@ -378,7 +397,7 @@ sensor:
   - platform: template
     id: position_current
     filters:
-      - lambda: return ((x-id(angle_pos_closed).state)/180);
+      - lambda: return ((x-id(angle_pos_closed).state)/id(angle_opening).state);
       - delta: 0.01
       - clamp:
           min_value: 0.0
@@ -403,10 +422,10 @@ sensor:
     address: 0x40
     shunt_resistance: 0.1 ohm
     max_current: 3.2A
-    adc_averaging: 128
+    adc_averaging: 4
     adc_time:
       voltage: 140us
-      current: 332us
+      current: 140us
     update_interval: 500ms
     # current:
     #   name: "Current"
@@ -418,6 +437,7 @@ sensor:
       name: "Power"
       filters:
         - delta: 0.01
+      id: s_power
       on_value:
         then:
         - if:
@@ -448,7 +468,7 @@ sensor:
                   then:
                     - logger.log:
                         level: INFO
-                        format: "Перегрузка при возврате %.2fW. Останавливаемся"
+                        format: "OVERLOAD ON RETURN! Power=%.2fW. STOP ACTION COVER"
                         args: [ 'x' ]
                     - script.execute: motor_stop
                     - script.stop: waiting_action_work
@@ -459,7 +479,7 @@ sensor:
                   else:
                     - logger.log:
                         level: INFO
-                        format: "Перегрузка %.2fW"
+                        format: "OVERLOAD! Power=%.2fW"
                         args: [ 'x' ]
                     - script.execute: power_overdrawn
 
@@ -509,9 +529,6 @@ script:
   - id: motor_stop
     mode: restart 
     then:
-      - logger.log:
-          level: INFO
-          format: "Run script motor_stop"
       - cover.template.publish:
           id: window
           current_operation: IDLE
@@ -526,6 +543,11 @@ script:
     parameters:
       new_position: float
     then:
+        - logger.log:
+            level: INFO
+            format: "action_cover_pos START. new_position=%.2f"
+            args: [ 'new_position']
+        - script.execute: check_spin
         - script.stop: motor_stop
         - if:
             condition:
@@ -535,9 +557,14 @@ script:
               - lambda: id(position_latest) = id(window).position;
               - logger.log:
                   level: INFO
-                  format: "id(position_new) = %.2f and id(position_latest) = %.2f"
-                  args: [ 'id(position_new)', 'id(position_latest)' ]
+                  format: "action_cover_pos WORK. unsuccessful_attempts=%.0f. Update position_new=%.2f and position_latest=%.2f"
+                  args: [ 'id(unsuccessful_attempts).state', 'id(position_new)', 'id(position_latest)' ]
               - script.execute: waiting_action_work
+            else:
+              - logger.log:
+                  level: INFO
+                  format: "action_cover_pos WORK. unsuccessful_attempts=%.0f. NOT update position_new=%.2f and position_latest=%.2f"
+                  args: [ 'id(unsuccessful_attempts).state', 'id(position_new)', 'id(position_latest)' ]
         - if:
             condition:
               lambda: |-
@@ -562,22 +589,23 @@ script:
                   condition:
                     lambda: 'return id(position_current).state <= new_position;'
                   timeout: 90s
+        - logger.log:
+            level: INFO
+            format: "action_cover_pos FINISH. new_position=%.2f. window position=%.2f"
+            args: ['new_position', 'id(window).position' ]
         - script.execute: motor_stop
-        - cover.template.publish:
-            id: window
-            current_operation: IDLE
-  - id: run_clockwise
-    mode: restart 
-    then:
-      - script.stop: run_counterclockwise
-      - script.stop: motor_stop
-      - output.turn_off: my_output_id1
-      - output.turn_off: my_output_id2
-      - lambda: id(my_output_id1).set_level(id(g_speed));
   - id: run_counterclockwise
     mode: restart 
     then:
       - script.stop: run_clockwise
+      - script.stop: motor_stop
+      - output.turn_off: my_output_id1
+      - output.turn_off: my_output_id2
+      - lambda: id(my_output_id1).set_level(id(g_speed));
+  - id: run_clockwise
+    mode: restart 
+    then:
+      - script.stop: run_counterclockwise
       - script.stop: motor_stop
       - output.turn_off: my_output_id1
       - output.turn_off: my_output_id2
@@ -587,7 +615,7 @@ script:
     then:
       - logger.log:
           level: INFO
-          format: "Ожидаем окончания дейтсвия для сброса проблем, новое положение %.2f"
+          format: "waiting_action_work START. position_new=%.2f"
           args: [ 'id(position_new)' ]
       - if:
           condition:
@@ -604,7 +632,7 @@ script:
       - button.press: fix_problem
       - logger.log:
           level: INFO
-          format: "Завершили ожидание, проблем %.0f, текущее положение %.2f"
+          format: "waiting_action_work FINISH. unsuccessful_attempts=%.0f. Window position=%.2f"
           args: ['id(unsuccessful_attempts).state', 'id(window).position' ]
   - id: power_overdrawn
     mode: restart 
@@ -612,12 +640,12 @@ script:
       - sensor.template.publish:
           id: unsuccessful_attempts
           state: !lambda 'return id(unsuccessful_attempts).state + 1;'
-      - script.execute: motor_stop
-      - script.wait: motor_stop
       - logger.log:
           level: INFO
-          format: "Проблема № %.0f . Текущее id(window).position = %.2f . Отправка на начальное и ожидание id(position_latest) = %.2f"
+          format: "power_overdrawn START. unsuccessful_attempts=%.0f. Window position=%.2f. SEND position_latest=%.2f"
           args: [ 'id(unsuccessful_attempts).state', 'id(window).position', 'id(position_latest)' ]
+      - script.execute: motor_stop
+      - script.wait: motor_stop
       - lambda: id(action_cover_pos)->execute(id(position_latest));
       - if:
           condition:
@@ -632,7 +660,7 @@ script:
                   - lambda: 'return id(position_current).state <= id(position_latest);'
       - logger.log:
           level: INFO
-          format: "Вернулись на предыдущее id(position_latest) = %.2f"
+          format: "power_overdrawn WORK. Completed the waiting. position_latest=%.2f"
           args: [ 'id(position_latest)']
       - if:
           condition:
@@ -640,7 +668,7 @@ script:
           then:
             - logger.log:
                 level: INFO
-                format: "Повторная отправка на id(position_new) = %.2f"
+                format: "power_overdraw WORK. Resending position_new=%.2f"
                 args: ['id(position_new)' ]
             - script.execute: motor_stop
             - script.wait: motor_stop
@@ -648,8 +676,34 @@ script:
           else:
             - logger.log:
                 level: INFO
-                format: "Превышено количество попыток %.0f"
+                format: "power_overdrawn WORK. Limit of attempts! unsuccessful_attempts=%.0f"
                 args: ['id(unsuccessful_attempts).state']
+  - id: check_spin
+    mode: restart 
+    then:
+      - lambda: id(gl_check_spin_latest) = id(window).position;
+      - delay: 2s
+      - while:
+          condition:
+            - lambda: return id(window).current_operation != CoverOperation::COVER_OPERATION_IDLE;
+          then:
+            - if:
+                condition:
+                  lambda: return id(gl_check_spin_latest) == id(window).position;
+                then:
+                  - logger.log:
+                      level: INFO
+                      format: "check_spin TRICK. Power=%.2fW. Run power_overdrawn. gl_check_spin_latest=%.2f. window position=%.2f "
+                      args: [ 'id(s_power).state','id(gl_check_spin_latest)','id(window).position' ]
+                  - script.execute: power_overdrawn
+                  - script.stop: check_spin
+                else:
+                  - logger.log:
+                      level: INFO
+                      format: "check_spin OK. gl_check_spin_latest=%.2f. window position=%.2f"
+                      args: [ 'id(gl_check_spin_latest)','id(window).position' ]
+                  - lambda: id(gl_check_spin_latest) = id(window).position;
+                  - delay: 2s
 
 button:
   - platform: restart
@@ -688,4 +742,4 @@ button:
           state: 0
       - logger.log:
           level: INFO
-          format: "Проблемы сброшены"
+          format: "fix_problem RUN"
