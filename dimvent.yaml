@@ -11,10 +11,11 @@ substitutions:
   api_key: !secret api_key
   ota_password: !secret ota_password
 
-  speed_high: "1.0"
-  speed_medium: "0.8"
-  speed_low: "0.68"
-  time_stoped_motor: 1s
+  speed_high: 1.0
+  speed_medium: 0.8
+  speed_low: 0.68
+  time_check_spin: 1100ms # Интервал проверки угла
+  time_stoped_motor: 1s # Время остановки мотора
   direction: clockwise
 
   pin_output_1: GPIO03
@@ -83,6 +84,9 @@ globals:
   - id: g_speed
     type: float
     restore_value: true
+  - id: g_speed_latest
+    type: float
+    initial_value: '0.0'
   - id: position_new
     type: float
     initial_value: '0.0'
@@ -291,9 +295,9 @@ select:
     entity_category: CONFIG
     restore_value: true
     options:
-      - High
-      - Medium
       - Low
+      - Medium
+      - High
     initial_option: Medium
     id: speed
     set_action:
@@ -311,20 +315,24 @@ select:
                     - lambda: id(g_speed) = ${speed_medium};
                   else:
                     - lambda: id(g_speed) = ${speed_low};
-        - if:
-            condition:
-              - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_OPENING;
-            then:
-              - output.set_level:
-                  id: my_output_id2
-                  level: !lambda 'return id(g_speed);' 
-        - if:
-            condition:
-              - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_CLOSING;
-            then:
-              - output.set_level:
-                  id: my_output_id1
-                  level: !lambda 'return id(g_speed);' 
+        - logger.log:
+            level: INFO
+            format: "speed set_action. g_speed=%.2f"
+            args: [ 'id(g_speed)' ]
+        - script.execute: speed_change_move
+  - platform: template
+    name: "Forced power increase"
+    icon: "mdi:speedometer"
+    optimistic: true
+    entity_category: CONFIG
+    restore_value: true
+    options:
+      - "OFF"
+      - Step
+      - Medium
+      - High
+    initial_option: Step
+    id: select_forced_power
 
 light:
   - platform: esp32_rmt_led_strip
@@ -389,6 +397,7 @@ sensor:
       - delta: 2
     status:
       name: Status magnet
+      # Добавить логику если проблемы с магнитом
     on_value:
       then:
         - sensor.template.publish:
@@ -519,6 +528,7 @@ cover:
     stop_action:
       then:
         - script.stop: action_cover_pos
+        - script.stop: power_overdrawn
         - script.execute: motor_stop
         - script.stop: waiting_action_work
         - button.press: fix_problem
@@ -679,10 +689,17 @@ script:
                 format: "power_overdrawn WORK. Limit of attempts! unsuccessful_attempts=%.0f"
                 args: ['id(unsuccessful_attempts).state']
   - id: check_spin
-    mode: restart 
+    mode: queued
+    max_runs: 2
+    # mode: restart 
     then:
+      - logger.log:
+          level: INFO
+          format: "check_spin START. Speed=%.20f. select_forced_power=%s"
+          args: [ 'id(g_speed)','id(select_forced_power).state.c_str()' ]
       - lambda: id(gl_check_spin_latest) = id(window).position;
-      - delay: 2s
+      - lambda: id(g_speed_latest) = id(g_speed);
+      - delay: ${time_check_spin}
       - while:
           condition:
             - lambda: return id(window).current_operation != CoverOperation::COVER_OPERATION_IDLE;
@@ -691,19 +708,72 @@ script:
                 condition:
                   lambda: return id(gl_check_spin_latest) == id(window).position;
                 then:
-                  - logger.log:
-                      level: INFO
-                      format: "check_spin TRICK. Power=%.2fW. Run power_overdrawn. gl_check_spin_latest=%.2f. window position=%.2f "
-                      args: [ 'id(s_power).state','id(gl_check_spin_latest)','id(window).position' ]
-                  - script.execute: power_overdrawn
-                  - script.stop: check_spin
+                  - if:
+                      condition:
+                        or:
+                        - lambda: return int(id(g_speed)*100) == ${speed_low*100|int} and id(select_forced_power).state == "Step";
+                        - lambda: return int(id(g_speed)*100) == ${speed_low*100|int} and id(select_forced_power).state == "Medium";
+                      then:
+                        - lambda: id(g_speed) = ${speed_medium};
+                        - script.execute: speed_change_move
+                        - logger.log:
+                            level: INFO
+                            format: "check_spin SPEED UPDATE medium. New Speed=%.2f. Latest Speed=%.2f. Power=%.2fW. gl_check_spin_latest=%.2f. window position=%.2f "
+                            args: [ 'id(g_speed)','id(g_speed_latest)','id(s_power).state','id(gl_check_spin_latest)','id(window).position' ]
+                      else:
+                        - if:
+                            condition:
+                              and:
+                              - lambda: return id(select_forced_power).state != "Medium";
+                              - or:
+                                - lambda: return int(id(g_speed)*100) == ${speed_medium*100|int} and id(select_forced_power).state == "Step";
+                                - lambda: return int(id(g_speed)*100) == ${speed_medium*100|int} and id(select_forced_power).state == "High";
+                                - lambda: return int(id(g_speed)*100) == ${speed_low*100|int} and id(select_forced_power).state == "High";
+                            then:
+                              - lambda: id(g_speed) = ${speed_high};
+                              - script.execute: speed_change_move
+                              - logger.log:
+                                  level: INFO
+                                  format: "check_spin SPEED UPDATE high. New Speed=%.2f. Latest Speed=%.2f. Power=%.2fW. gl_check_spin_latest=%.2f. window position=%.2f "
+                                  args: [ 'id(g_speed)','id(g_speed_latest)','id(s_power).state','id(gl_check_spin_latest)','id(window).position' ]
+                            else:
+                              - lambda: id(g_speed) = id(g_speed_latest);
+                              # - script.execute: speed_change_move
+                              - logger.log:
+                                  level: INFO
+                                  format: "check_spin RUN power_overdrawn. Speed=%.2f. Power=%.2fW. gl_check_spin_latest=%.2f. window position=%.2f "
+                                  args: [ 'id(g_speed)','id(s_power).state','id(gl_check_spin_latest)','id(window).position' ]
+                              - script.execute: power_overdrawn
+                              - script.stop: check_spin
                 else:
                   - logger.log:
                       level: INFO
-                      format: "check_spin OK. gl_check_spin_latest=%.2f. window position=%.2f"
-                      args: [ 'id(gl_check_spin_latest)','id(window).position' ]
+                      format: "check_spin OK. Speed=%.2f. gl_check_spin_latest=%.2f. window position=%.2f"
+                      args: [ 'id(g_speed)','id(gl_check_spin_latest)','id(window).position' ]
                   - lambda: id(gl_check_spin_latest) = id(window).position;
-                  - delay: 2s
+            - delay: ${time_check_spin}
+      - lambda: id(g_speed) = id(g_speed_latest);
+      - logger.log:
+          level: INFO
+          format: "check_spin FINISH. Speed=%.2f"
+          args: [ 'id(g_speed)' ]
+  - id: speed_change_move
+    mode: restart 
+    then:
+      - if:
+          condition:
+            - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_OPENING;
+          then:
+            - output.set_level:
+                id: my_output_id1
+                level: !lambda 'return id(g_speed);' 
+      - if:
+          condition:
+            - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_CLOSING;
+          then:
+            - output.set_level:
+                id: my_output_id2
+                level: !lambda 'return id(g_speed);' 
 
 button:
   - platform: restart
