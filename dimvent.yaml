@@ -15,7 +15,7 @@ substitutions:
   speed_medium: 0.8
   speed_low: 0.68
   time_check_spin: 1100ms # Интервал проверки угла
-  time_stoped_motor: 1s # Время остановки мотора
+  time_stoped_motor: 650ms # Время остановки мотора
   direction: clockwise
 
   pin_output_1: GPIO03
@@ -45,12 +45,13 @@ wifi:
 esp32:
   board: esp32-c3-devkitm-1
   framework:
-    type: arduino
+    type: esp-idf
 
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
   name_add_mac_suffix: ${name_add_mac_suffix}
+  min_version: 2025.12.0
   project:
     name: ${project}
     version: ${device_name}
@@ -455,15 +456,15 @@ sensor:
               - and:
                 - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_OPENING;
                 - or:
-                  - lambda: return id(speed).state == "High" and x >= id(lim_open_high).state;
-                  - lambda: return id(speed).state == "Medium" and x >= id(lim_open_medium).state;
-                  - lambda: return id(speed).state == "Low" and x >= id(lim_open_low).state;
+                  - lambda: return id(speed).current_option() == "High" and x >= id(lim_open_high).state;
+                  - lambda: return id(speed).current_option() == "Medium" and x >= id(lim_open_medium).state;
+                  - lambda: return id(speed).current_option() == "Low" and x >= id(lim_open_low).state;
               - and:
                 - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_CLOSING;
                 - or:
-                  - lambda: return id(speed).state == "High" and x >= id(lim_close_high).state;
-                  - lambda: return id(speed).state == "Medium" and x >= id(lim_close_medium).state;
-                  - lambda: return id(speed).state == "Low" and x >= id(lim_close_low).state;
+                  - lambda: return id(speed).current_option() == "High" and x >= id(lim_close_high).state;
+                  - lambda: return id(speed).current_option() == "Medium" and x >= id(lim_close_medium).state;
+                  - lambda: return id(speed).current_option() == "Low" and x >= id(lim_close_low).state;
             then:
               - if:
                   condition:
@@ -539,6 +540,9 @@ script:
   - id: motor_stop
     mode: restart 
     then:
+      - logger.log:
+          level: INFO
+          format: "|motor_stop|START|"
       - cover.template.publish:
           id: window
           current_operation: IDLE
@@ -548,6 +552,9 @@ script:
       - delay: ${time_stoped_motor}
       - output.turn_off: my_output_id1
       - output.turn_off: my_output_id2
+      - logger.log:
+          level: INFO
+          format: "|motor_stop|FINISH|"
   - id: action_cover_pos
     mode: restart 
     parameters:
@@ -555,9 +562,8 @@ script:
     then:
         - logger.log:
             level: INFO
-            format: "action_cover_pos START. new_position=%.2f"
+            format: "|action_cover_pos|START| new_position=%.2f"
             args: [ 'new_position']
-        - script.execute: check_spin
         - script.stop: motor_stop
         - if:
             condition:
@@ -567,14 +573,15 @@ script:
               - lambda: id(position_latest) = id(window).position;
               - logger.log:
                   level: INFO
-                  format: "action_cover_pos WORK. unsuccessful_attempts=%.0f. Update position_new=%.2f and position_latest=%.2f"
+                  format: "|action_cover_pos|WORK| unsuccessful_attempts=%.0f. Update position_new=%.2f and position_latest=%.2f"
                   args: [ 'id(unsuccessful_attempts).state', 'id(position_new)', 'id(position_latest)' ]
               - script.execute: waiting_action_work
             else:
               - logger.log:
                   level: INFO
-                  format: "action_cover_pos WORK. unsuccessful_attempts=%.0f. NOT update position_new=%.2f and position_latest=%.2f"
+                  format: "|action_cover_pos|WORK| unsuccessful_attempts=%.0f. NOT update position_new=%.2f and position_latest=%.2f"
                   args: [ 'id(unsuccessful_attempts).state', 'id(position_new)', 'id(position_latest)' ]
+        - script.execute: check_spin
         - if:
             condition:
               lambda: |-
@@ -601,12 +608,15 @@ script:
                   timeout: 90s
         - logger.log:
             level: INFO
-            format: "action_cover_pos FINISH. new_position=%.2f. window position=%.2f"
+            format: "|action_cover_pos|FINISH| new_position=%.2f. window position=%.2f"
             args: ['new_position', 'id(window).position' ]
         - script.execute: motor_stop
   - id: run_counterclockwise
     mode: restart 
     then:
+      - logger.log:
+          level: INFO
+          format: "|run_counterclockwise|START|"
       - script.stop: run_clockwise
       - script.stop: motor_stop
       - output.turn_off: my_output_id1
@@ -615,6 +625,9 @@ script:
   - id: run_clockwise
     mode: restart 
     then:
+      - logger.log:
+          level: INFO
+          format: "|run_clockwise|START|"
       - script.stop: run_counterclockwise
       - script.stop: motor_stop
       - output.turn_off: my_output_id1
@@ -625,7 +638,7 @@ script:
     then:
       - logger.log:
           level: INFO
-          format: "waiting_action_work START. position_new=%.2f"
+          format: "|waiting_action_work|START| position_new=%.2f"
           args: [ 'id(position_new)' ]
       - if:
           condition:
@@ -642,7 +655,7 @@ script:
       - button.press: fix_problem
       - logger.log:
           level: INFO
-          format: "waiting_action_work FINISH. unsuccessful_attempts=%.0f. Window position=%.2f"
+          format: "|waiting_action_work|FINISH| unsuccessful_attempts=%.0f. Window position=%.2f"
           args: ['id(unsuccessful_attempts).state', 'id(window).position' ]
   - id: power_overdrawn
     mode: restart 
@@ -652,7 +665,7 @@ script:
           state: !lambda 'return id(unsuccessful_attempts).state + 1;'
       - logger.log:
           level: INFO
-          format: "power_overdrawn START. unsuccessful_attempts=%.0f. Window position=%.2f. SEND position_latest=%.2f"
+          format: "|power_overdrawn|START| unsuccessful_attempts=%.0f. Window position=%.2f. SEND position_latest=%.2f"
           args: [ 'id(unsuccessful_attempts).state', 'id(window).position', 'id(position_latest)' ]
       - script.execute: motor_stop
       - script.wait: motor_stop
@@ -661,16 +674,24 @@ script:
           condition:
             lambda: 'return id(position_current).state < id(position_latest);'
           then:
+            - logger.log:
+                level: INFO
+                format: "|power_overdrawn|WORK| wait_until IF. Window position=%.2f. position_current=%.2f. position_latest=%.2f"
+                args: [ 'id(window).position', 'id(position_current).state', 'id(position_latest)' ]
             - wait_until:
                 condition:
                   - lambda: 'return id(position_current).state >= id(position_latest);'
           else:
+            - logger.log:
+                level: INFO
+                format: "|power_overdrawn|WORK| wait_until ELSE. Window position=%.2f. position_current=%.2f. position_latest=%.2f"
+                args: [ 'id(window).position', 'id(position_current).state', 'id(position_latest)' ]
             - wait_until:
                 condition:
                   - lambda: 'return id(position_current).state <= id(position_latest);'
       - logger.log:
           level: INFO
-          format: "power_overdrawn WORK. Completed the waiting. position_latest=%.2f"
+          format: "|power_overdrawn|WORK| Completed the waiting. position_latest=%.2f"
           args: [ 'id(position_latest)']
       - if:
           condition:
@@ -678,7 +699,7 @@ script:
           then:
             - logger.log:
                 level: INFO
-                format: "power_overdraw WORK. Resending position_new=%.2f"
+                format: "|power_overdraw|WORK| Resending position_new=%.2f"
                 args: ['id(position_new)' ]
             - script.execute: motor_stop
             - script.wait: motor_stop
@@ -686,18 +707,17 @@ script:
           else:
             - logger.log:
                 level: INFO
-                format: "power_overdrawn WORK. Limit of attempts! unsuccessful_attempts=%.0f"
+                format: "|power_overdrawn|WORK| Limit of attempts! unsuccessful_attempts=%.0f"
                 args: ['id(unsuccessful_attempts).state']
   - id: check_spin
     mode: queued
     max_runs: 2
-    # mode: restart 
     then:
+      - lambda: id(gl_check_spin_latest) = id(window).position;
       - logger.log:
           level: INFO
-          format: "check_spin START. Speed=%.20f. select_forced_power=%s"
-          args: [ 'id(g_speed)','id(select_forced_power).state.c_str()' ]
-      - lambda: id(gl_check_spin_latest) = id(window).position;
+          format: "|check_spin|START| gl_check_spin_latest=%.2f. Speed=%.2f. select_forced_power=%s"
+          args: [ 'id(gl_check_spin_latest)','id(g_speed)','id(select_forced_power).current_option()' ]
       - lambda: id(g_speed_latest) = id(g_speed);
       - delay: ${time_check_spin}
       - while:
@@ -711,51 +731,51 @@ script:
                   - if:
                       condition:
                         or:
-                        - lambda: return int(id(g_speed)*100) == ${speed_low*100|int} and id(select_forced_power).state == "Step";
-                        - lambda: return int(id(g_speed)*100) == ${speed_low*100|int} and id(select_forced_power).state == "Medium";
+                        - lambda: return int(id(g_speed)*100) == ${(speed_low*100)|int} and id(select_forced_power).current_option() == "Step";
+                        - lambda: return int(id(g_speed)*100) == ${(speed_low*100)|int} and id(select_forced_power).current_option() == "Medium";
                       then:
                         - lambda: id(g_speed) = ${speed_medium};
                         - script.execute: speed_change_move
                         - logger.log:
                             level: INFO
-                            format: "check_spin SPEED UPDATE medium. New Speed=%.2f. Latest Speed=%.2f. Power=%.2fW. gl_check_spin_latest=%.2f. window position=%.2f "
+                            format: "|check_spin|SPEED UPDATE medium| New Speed=%.2f. Latest Speed=%.2f. Power=%.2fW. gl_check_spin_latest=%.2f. window position=%.2f "
                             args: [ 'id(g_speed)','id(g_speed_latest)','id(s_power).state','id(gl_check_spin_latest)','id(window).position' ]
                       else:
                         - if:
                             condition:
                               and:
-                              - lambda: return id(select_forced_power).state != "Medium";
+                              - lambda: return id(select_forced_power).current_option() != "Medium";
                               - or:
-                                - lambda: return int(id(g_speed)*100) == ${speed_medium*100|int} and id(select_forced_power).state == "Step";
-                                - lambda: return int(id(g_speed)*100) == ${speed_medium*100|int} and id(select_forced_power).state == "High";
-                                - lambda: return int(id(g_speed)*100) == ${speed_low*100|int} and id(select_forced_power).state == "High";
+                                - lambda: return int(id(g_speed)*100) == ${(speed_medium*100)|int} and id(select_forced_power).current_option() == "Step";
+                                - lambda: return int(id(g_speed)*100) == ${(speed_medium*100)|int} and id(select_forced_power).current_option() == "High";
+                                - lambda: return int(id(g_speed)*100) == ${(speed_low*100)|int} and id(select_forced_power).current_option() == "High";
                             then:
                               - lambda: id(g_speed) = ${speed_high};
                               - script.execute: speed_change_move
                               - logger.log:
                                   level: INFO
-                                  format: "check_spin SPEED UPDATE high. New Speed=%.2f. Latest Speed=%.2f. Power=%.2fW. gl_check_spin_latest=%.2f. window position=%.2f "
+                                  format: "|check_spin|SPEED UPDATE high| New Speed=%.2f. Latest Speed=%.2f. Power=%.2fW. gl_check_spin_latest=%.2f. window position=%.2f "
                                   args: [ 'id(g_speed)','id(g_speed_latest)','id(s_power).state','id(gl_check_spin_latest)','id(window).position' ]
                             else:
                               - lambda: id(g_speed) = id(g_speed_latest);
                               # - script.execute: speed_change_move
                               - logger.log:
                                   level: INFO
-                                  format: "check_spin RUN power_overdrawn. Speed=%.2f. Power=%.2fW. gl_check_spin_latest=%.2f. window position=%.2f "
+                                  format: "|check_spin|RUN power_overdrawn| Speed=%.2f. Power=%.2fW. gl_check_spin_latest=%.2f. window position=%.2f "
                                   args: [ 'id(g_speed)','id(s_power).state','id(gl_check_spin_latest)','id(window).position' ]
                               - script.execute: power_overdrawn
                               - script.stop: check_spin
                 else:
                   - logger.log:
                       level: INFO
-                      format: "check_spin OK. Speed=%.2f. gl_check_spin_latest=%.2f. window position=%.2f"
+                      format: "|check_spin|OK| Speed=%.2f. gl_check_spin_latest=%.2f. window position=%.2f"
                       args: [ 'id(g_speed)','id(gl_check_spin_latest)','id(window).position' ]
                   - lambda: id(gl_check_spin_latest) = id(window).position;
             - delay: ${time_check_spin}
       - lambda: id(g_speed) = id(g_speed_latest);
       - logger.log:
           level: INFO
-          format: "check_spin FINISH. Speed=%.2f"
+          format: "|check_spin|FINISH| Speed=%.2f"
           args: [ 'id(g_speed)' ]
   - id: speed_change_move
     mode: restart 
@@ -812,4 +832,4 @@ button:
           state: 0
       - logger.log:
           level: INFO
-          format: "fix_problem RUN"
+          format: "|fix_problem|OK|"
