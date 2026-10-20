@@ -21,12 +21,17 @@ substitutions:
   pin_output_1: GPIO03
   pin_output_2: GPIO04
   pin_light: GPIO05
-  pin_dir: GPIO010
+  pin_dir: GPIO10
   pin_sda: GPIO06
   pin_scl: GPIO07
   pin_button_1: GPIO00
   pin_button_2: GPIO01
-
+  # Число попыток автоматического возврата в рабочий диапазон.
+  recovery_attempts: "3"
+  # Максимальное время движения за одну попытку.
+  recovery_timeout: 10s
+  # Пауза после торможения перед следующей попыткой.
+  recovery_pause: 500ms
 api:
   encryption:
     key: ${api_key}
@@ -97,6 +102,10 @@ globals:
   - id: gl_check_spin_latest
     type: float
     initial_value: '0.0'
+  # Положение по AS5600 без ограничения диапазоном 0...1.
+  - id: position_unclamped
+    type: float
+    initial_value: 'NAN'
 
 binary_sensor:
   - platform: status
@@ -128,15 +137,38 @@ binary_sensor:
       number: ${pin_button_1}
       mode: INPUT_PULLUP
       inverted: True
-    on_press:
-      then:
-        - if:
-            condition:
-              - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_IDLE;
-            then:
-              - cover.open: window
-            else:
-              - cover.stop: window
+    on_multi_click:
+      # Короткое нажатие (< 800 мс) — обычное открытие / стоп
+      - timing:
+          - ON for at most 0.8s
+          - OFF for at least 0.3s
+        then:
+          - if:
+              condition:
+                - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_IDLE;
+              then:
+                - cover.open: window
+              else:
+                - cover.stop: window
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at most 0.4s
+          - ON for at most 0.5s
+          - OFF for at least 0.3s
+        then:
+          - logger.log: "BT1 double click -> fix_problem"
+          - button.press: fix_problem
+      # Длинное нажатие (>= 1.5 с) — ручное вращение против часовой (открытие)
+      - timing:
+          - ON for at least 1.5s
+        then:
+          - logger.log: "BT1 long press -> run_counterclockwise"
+          - script.execute: run_counterclockwise
+          - wait_until:
+              condition:
+                binary_sensor.is_off: bt1
+          - script.execute: motor_stop
+
   - platform: gpio
     name: Button2
     disabled_by_default: true
@@ -147,15 +179,37 @@ binary_sensor:
       number: ${pin_button_2}
       mode: INPUT_PULLUP
       inverted: True
-    on_press:
-      then:
-        - if:
-            condition:
-              - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_IDLE;
-            then:
-              - cover.close: window
-            else:
-              - cover.stop: window
+    on_multi_click:
+      # Короткое нажатие — обычное закрытие / стоп
+      - timing:
+          - ON for at most 0.8s
+          - OFF for at least 0.3s
+        then:
+          - if:
+              condition:
+                - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_IDLE;
+              then:
+                - cover.close: window
+              else:
+                - cover.stop: window
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at most 0.4s
+          - ON for at most 0.5s
+          - OFF for at least 0.3s
+        then:
+          - logger.log: "BT1 double click -> fix_problem"
+          - button.press: fix_problem
+      # Длинное нажатие — ручное вращение по часовой (закрытие)
+      - timing:
+          - ON for at least 1.5s
+        then:
+          - logger.log: "BT2 long press -> run_clockwise"
+          - script.execute: run_clockwise
+          - wait_until:
+              condition:
+                binary_sensor.is_off: bt2
+          - script.execute: motor_stop
 
 number:
   - platform: template
@@ -337,7 +391,7 @@ select:
 
 light:
   - platform: esp32_rmt_led_strip
-    rgb_order: GRB
+    channel_colors: GRB
     default_transition_length: 0s
     pin: ${pin_light}
     num_leds: 1
@@ -401,9 +455,35 @@ sensor:
       # Добавить логику если проблемы с магнитом
     on_value:
       then:
-        - sensor.template.publish:
-            id: position_current
-            state: !lambda 'return x;'
+        - lambda: |-
+            const float closed = id(angle_pos_closed).state;
+            const float opening = id(angle_opening).state;
+
+            if (!std::isfinite(x) ||
+                !std::isfinite(closed) ||
+                !std::isfinite(opening) ||
+                opening <= 0.0f) {
+              id(position_unclamped) = NAN;
+              return;
+            }
+
+            // Представляем угол относительно середины рабочего диапазона.
+            // Это позволяет учитывать переход AS5600 через 0/360 градусов.
+            const float center = closed + opening * 0.5f;
+            float offset = fmodf(x - center + 180.0f, 360.0f);
+            if (offset < 0.0f) {
+              offset += 360.0f;
+            }
+            offset -= 180.0f;
+
+            const float continuous_angle = center + offset;
+            const float position = (continuous_angle - closed) / opening;
+
+            id(position_unclamped) = position;
+
+            // Существующая цепочка продолжит формировать положение 0...1.
+            id(position_current).publish_state(continuous_angle);
+
   - platform: template
     id: position_current
     filters:
@@ -456,15 +536,15 @@ sensor:
               - and:
                 - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_OPENING;
                 - or:
-                  - lambda: return id(speed).current_option() == "High" and x >= id(lim_open_high).state;
-                  - lambda: return id(speed).current_option() == "Medium" and x >= id(lim_open_medium).state;
-                  - lambda: return id(speed).current_option() == "Low" and x >= id(lim_open_low).state;
+                  - lambda: return std::string(id(speed).current_option()) == "High" and x >= id(lim_open_high).state;
+                  - lambda: return std::string(id(speed).current_option()) == "Medium" and x >= id(lim_open_medium).state;
+                  - lambda: return std::string(id(speed).current_option()) == "Low" and x >= id(lim_open_low).state;
               - and:
                 - lambda: return id(window).current_operation == CoverOperation::COVER_OPERATION_CLOSING;
                 - or:
-                  - lambda: return id(speed).current_option() == "High" and x >= id(lim_close_high).state;
-                  - lambda: return id(speed).current_option() == "Medium" and x >= id(lim_close_medium).state;
-                  - lambda: return id(speed).current_option() == "Low" and x >= id(lim_close_low).state;
+                  - lambda: return std::string(id(speed).current_option()) == "High" and x >= id(lim_close_high).state;
+                  - lambda: return std::string(id(speed).current_option()) == "Medium" and x >= id(lim_close_medium).state;
+                  - lambda: return std::string(id(speed).current_option()) == "Low" and x >= id(lim_close_low).state;
             then:
               - if:
                   condition:
@@ -516,27 +596,175 @@ cover:
     lambda: return id(position_current).state;
     open_action:
       then:
-        - button.press: fix_problem
-        - lambda: id(action_cover_pos)->execute(1.0);
+        - script.execute:
+            id: recover_and_move
+            target_position: 1.0
+
     close_action:
       then:
-        - button.press: fix_problem
-        - lambda: id(action_cover_pos)->execute(0);
+        - script.execute:
+            id: recover_and_move
+            target_position: 0.0
+
     position_action:
       then:
-        - button.press: fix_problem
-        - lambda: id(action_cover_pos)->execute(pos);
+        - script.execute:
+            id: recover_and_move
+            target_position: !lambda 'return pos;'
+
     stop_action:
       then:
+        - script.stop: recover_and_move
         - script.stop: action_cover_pos
         - script.stop: power_overdrawn
-        - script.execute: motor_stop
         - script.stop: waiting_action_work
+        - script.stop: check_spin
+        - script.execute: motor_stop
         - button.press: fix_problem
-    has_position: true
-    device_class: window
 
 script:
+  - id: recover_and_move
+    mode: restart
+    parameters:
+      target_position: float
+    then:
+      # Отменяем предыдущую команду и её фоновые проверки.
+      - script.stop: action_cover_pos
+      - script.stop: power_overdrawn
+      - script.stop: waiting_action_work
+      - script.stop: check_spin
+
+      - script.execute: motor_stop
+      - script.wait: motor_stop
+
+      - button.press: fix_problem
+
+      # Возвращаем выбранную пользователем скорость:
+      # check_spin мог временно увеличить g_speed.
+      - lambda: |-
+          const std::string selected = id(speed).current_option();
+          if (selected == "High") {
+            id(g_speed) = ${speed_high};
+          } else if (selected == "Medium") {
+            id(g_speed) = ${speed_medium};
+          } else {
+            id(g_speed) = ${speed_low};
+          }
+
+      - repeat:
+          count: ${recovery_attempts}
+          then:
+            - if:
+                condition:
+                  lambda: |-
+                    const float p = id(position_unclamped);
+                    return std::isfinite(p) && (p < 0.0f || p > 1.0f);
+                then:
+                  - logger.log:
+                      level: WARN
+                      format: "Outside working range: %.3f. Recovery attempt."
+                      args: ['id(position_unclamped)']
+
+                  # При восстановлении cover остаётся IDLE.
+                  # Обычные power_overdrawn/check_spin не запускаются.
+                  # Мощность проверяется отдельно в wait_until ниже.
+                  - if:
+                      condition:
+                        lambda: 'return id(position_unclamped) < 0.0f;'
+                      then:
+                        - script.execute: run_counterclockwise
+
+                        - wait_until:
+                            condition:
+                              lambda: |-
+                                const float p = id(position_unclamped);
+                                const float power = id(s_power).state;
+                                const std::string selected = id(speed).current_option();
+
+                                float limit = id(lim_open_high).state;
+                                if (selected == "Medium") {
+                                  limit = id(lim_open_medium).state;
+                                } else if (selected == "Low") {
+                                  limit = id(lim_open_low).state;
+                                }
+
+                                return !std::isfinite(p) ||
+                                       !std::isfinite(power) ||
+                                       p >= 0.0f ||
+                                       power >= limit;
+                            timeout: ${recovery_timeout}
+
+                      else:
+                        - script.execute: run_clockwise
+
+                        - wait_until:
+                            condition:
+                              lambda: |-
+                                const float p = id(position_unclamped);
+                                const float power = id(s_power).state;
+                                const std::string selected = id(speed).current_option();
+
+                                float limit = id(lim_close_high).state;
+                                if (selected == "Medium") {
+                                  limit = id(lim_close_medium).state;
+                                } else if (selected == "Low") {
+                                  limit = id(lim_close_low).state;
+                                }
+
+                                return !std::isfinite(p) ||
+                                       !std::isfinite(power) ||
+                                       p <= 1.0f ||
+                                       power >= limit;
+                            timeout: ${recovery_timeout}
+
+                  - script.execute: motor_stop
+                  - script.wait: motor_stop
+                  - delay: ${recovery_pause}
+
+      # После торможения проверяем фактическое положение заново.
+      - if:
+          condition:
+            lambda: |-
+              const float p = id(position_unclamped);
+              return std::isfinite(p) && p >= 0.0f && p <= 1.0f;
+          then:
+            - logger.log:
+                level: INFO
+                format: "Working range restored. Position=%.3f, target=%.3f"
+                args:
+                  - 'id(position_unclamped)'
+                  - 'target_position'
+
+            # Не запускаем мотор, если цель уже достигнута.
+            # Допуск соответствует фильтру угла delta: 2 градуса.
+            - if:
+                condition:
+                  lambda: |-
+                    const float tolerance = 2.0f / id(angle_opening).state;
+                    return fabsf(id(position_unclamped) - target_position) > tolerance;
+                then:
+                  - script.execute:
+                      id: action_cover_pos
+                      new_position: !lambda 'return target_position;'
+
+          else:
+            - logger.log:
+                level: ERROR
+                format: "Recovery failed or invalid angle. Position=%.3f"
+                args: ['id(position_unclamped)']
+
+            - script.execute: motor_stop
+            - script.wait: motor_stop
+
+            - sensor.template.publish:
+                id: unsuccessful_attempts
+                state: !lambda |-
+                  return fmaxf(3.0f, id(number_repeat_attempts).state);
+
+            - binary_sensor.template.publish:
+                id: problem_attempts_exceeded
+                state: ON
+                
   - id: motor_stop
     mode: restart 
     then:
@@ -564,6 +792,7 @@ script:
             level: INFO
             format: "|action_cover_pos|START| new_position=%.2f"
             args: [ 'new_position']
+
         - script.stop: motor_stop
         - if:
             condition:
@@ -611,6 +840,7 @@ script:
             format: "|action_cover_pos|FINISH| new_position=%.2f. window position=%.2f"
             args: ['new_position', 'id(window).position' ]
         - script.execute: motor_stop
+
   - id: run_counterclockwise
     mode: restart 
     then:
@@ -717,7 +947,7 @@ script:
       - logger.log:
           level: INFO
           format: "|check_spin|START| gl_check_spin_latest=%.2f. Speed=%.2f. select_forced_power=%s"
-          args: [ 'id(gl_check_spin_latest)','id(g_speed)','id(select_forced_power).current_option()' ]
+          args: [ 'id(gl_check_spin_latest)', 'id(g_speed)', 'id(select_forced_power).current_option().c_str()' ]
       - lambda: id(g_speed_latest) = id(g_speed);
       - delay: ${time_check_spin}
       - while:
@@ -731,8 +961,8 @@ script:
                   - if:
                       condition:
                         or:
-                        - lambda: return int(id(g_speed)*100) == ${(speed_low*100)|int} and id(select_forced_power).current_option() == "Step";
-                        - lambda: return int(id(g_speed)*100) == ${(speed_low*100)|int} and id(select_forced_power).current_option() == "Medium";
+                        - lambda: return int(id(g_speed)*100) == ${speed_low*100|int} and std::string(id(select_forced_power).current_option()) == "Step";
+                        - lambda: return int(id(g_speed)*100) == ${speed_low*100|int} and std::string(id(select_forced_power).current_option()) == "Medium";
                       then:
                         - lambda: id(g_speed) = ${speed_medium};
                         - script.execute: speed_change_move
@@ -744,11 +974,11 @@ script:
                         - if:
                             condition:
                               and:
-                              - lambda: return id(select_forced_power).current_option() != "Medium";
+                              - lambda: return std::string(id(select_forced_power).current_option()) != "Medium";
                               - or:
-                                - lambda: return int(id(g_speed)*100) == ${(speed_medium*100)|int} and id(select_forced_power).current_option() == "Step";
-                                - lambda: return int(id(g_speed)*100) == ${(speed_medium*100)|int} and id(select_forced_power).current_option() == "High";
-                                - lambda: return int(id(g_speed)*100) == ${(speed_low*100)|int} and id(select_forced_power).current_option() == "High";
+                                - lambda: return int(id(g_speed)*100) == ${speed_medium*100|int} and std::string(id(select_forced_power).current_option()) == "Step";
+                                - lambda: return int(id(g_speed)*100) == ${speed_medium*100|int} and std::string(id(select_forced_power).current_option()) == "High";
+                                - lambda: return int(id(g_speed)*100) == ${speed_low*100|int} and std::string(id(select_forced_power).current_option()) == "High";
                             then:
                               - lambda: id(g_speed) = ${speed_high};
                               - script.execute: speed_change_move
@@ -820,6 +1050,11 @@ button:
     id: buttont_motor_stop
     icon: "mdi:stop"
     on_press:
+      - script.stop: recover_and_move
+      - script.stop: action_cover_pos
+      - script.stop: power_overdrawn
+      - script.stop: waiting_action_work
+      - script.stop: check_spin
       - script.execute: motor_stop
   - platform: template
     name: "Fix problem"
